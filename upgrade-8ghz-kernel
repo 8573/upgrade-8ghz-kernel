@@ -62,11 +62,11 @@ function yn {
 	echo "${headerfmt}${desc:-Run \`${cmd}\`?}${rec}$endfmt"
 	select c in yes no; {
 		case $c {
-			(yes)	if {eval $cmd} {
+			(yes)	local r
+				if {eval "$cmd; r=\$?"} {
 					return 0
 				}
 				# Command failed.
-				local r=$?
 				if [[ -n $nofail ]] {
 					return $r
 				} else {
