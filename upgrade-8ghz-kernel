@@ -1,0 +1,374 @@
+#!/usr/bin/env zsh
+emulate zsh -uo PipeFail -o ExtendedGlob
+
+# "8ghz" = "8573-Gentoo-Hardened-ZFS" (not "eight gigahertz").
+
+# Temporarily loosen umask so that the Portage user can access generated files.
+local oldumask=$(umask)
+umask 022
+
+autoload -Uz colors && colors
+local headerfmt="\n$fg_bold[cyan]"
+local msgfmt="$reset_color"
+local errfmt="$fg_no_bold[red]"
+local keyfmt="$fg_no_bold[cyan]"
+local endfmt="$msgfmt"
+local cpus=8
+local efiFPathMaxLen=39
+local efiFNameMaxLen=27
+
+PS3="	$fg_bold[green]?>$reset_color "
+
+function msg {
+	echo "$msgfmt$1$endfmt"
+}
+
+function err {
+	echo "$errfmt$1$endfmt"
+}
+
+fail() {
+	if [[ -n $1 && -n $2 && -z $3 ]]; then
+		err $2
+		exit $1
+	else
+		err "fail($1, '$2'): bad arguments"
+		exit 2
+	fi
+}
+
+function drop_caches {
+	# Hangs at ~100% CPU usage.
+	#echo 3 >| /proc/sys/vm/drop_caches
+}
+
+drop_caches
+
+if [[ $PWD != /usr/src/linux ]] {
+	fail 3 'This must be run in /usr/src/linux.'
+}
+
+if [[ ! -e .config ]] {
+	fail 4 'You should get a .config first.'
+}
+
+function yn {
+	local desc=$1 cmd=$2 rec=${3-} nofail=${4-}
+	if [[ $rec == \(*\) ]] {
+		rec=" $rec"
+	} elif [[ -n $rec ]] {
+		rec=' (recommended)'
+	}
+	echo "${headerfmt}${desc:-Run \`${cmd}\`?}${rec}$endfmt"
+	select c in yes no; {
+		case $c {
+			(yes)	if {eval $cmd} {
+					return 0
+				}
+				# Command failed.
+				local r=$?
+				if [[ -n $nofail ]] {
+					return $r
+				} else {
+					fail $r "Command \`$keyfmt${cmd}$errfmt\` failed; exit status: $keyfmt$r$errfmt"
+				}
+				;;
+			(no)	return 2;;
+			(*)	msg 'What?';;
+		}
+	}
+}
+
+local -A choicesTaken
+
+function sl {
+	local desc=$1 choices=$2 cmd=$3
+	echo "${headerfmt}Select ${desc}:$endfmt"
+	for c (${(k)choicesTaken}) {
+		echo "   ($c: ${keyfmt}${choicesTaken[$c]}$endfmt)"
+	}
+	local choice
+	local -a cs
+	if [[ $choices =~ '^ ' ]] {
+		cs=($=choices)
+	} else {
+		cs=($~choices)
+	}
+	select c in $cs '(skip)'; {
+		if [[ -n $c ]] {
+			choice=$c
+		}
+		if [[ -z $choice && $REPLY != 'go' ]] {
+			msg 'What?'
+		}
+		if [[ -n $choice && $REPLY != 'go' ]] {
+			msg "Enter '${keyfmt}go$endfmt' to use ${keyfmt}${(q-)choice}$endfmt, or enter another number."
+		}
+		if [[ -z $choice && $REPLY == 'go' ]] {
+			msg 'Make a choice first.'
+		}
+		if [[ -n $choice && $REPLY == 'go' ]] {
+			choicesTaken[$desc]=$choice
+			if [[ $choice != '(skip)' ]] {
+				eval ${cmd//@@@/$choice} && return 0 || exit $?
+			} else {
+				msg "Skipping $desc."
+				return 1
+			}
+		}
+	}
+}
+
+function menuconfig {
+	make MENUCONFIG_COLOR=mono menuconfig
+}
+
+local skipToMenu=''
+
+yn 'Skip guided prolog sequence?' 'skipToMenu=1'
+
+if [[ $skipToMenu != 1 ]] {
+
+yn '' 'make clean'
+yn '' "menuconfig; $SHELL" '' no-fail
+yn '' 'make prepare' rec
+# This ^ step isn’t included in prometheanfire’s guide, but is apparently
+# necessary.
+#yn '' 'chmod -R go+rX include/generated/utsrelease.h'
+#yn '' 'chmod -R go+rX .'
+# These ^^ steps come from <https://bugs.gentoo.org/show_bug.cgi?id=484828#c8>.
+# Going by something ryao said, it may only be necessary to chmod
+# `utsrelease.h` itself.
+#
+# Now that I added the umask override, these steps are unnecessary.
+
+sl 'SPL ebuild' '/usr/portage/sys-kernel/spl/*.ebuild' \
+	'env EXTRA_ECONF="--enable-linux-builtin" ebuild @@@ clean configure'
+
+sl 'SPL workdir' '/var/tmp/portage/sys-kernel/spl-*/work/spl-spl-*' \
+	'(cd @@@ && ./copy-builtin /usr/src/linux)'
+
+# The following command is unnecessary. Don’t bother running it.
+#yn '' "cp ${choicesTaken[SPL workdir]}/spl.release.in ."
+# This ^ `cp` step was also not included; prometheanfire told me about it
+#  when I asked after the next command failed without a hint of what to do.
+# As of 02013-06-21, he intends to obviate it by fixing the package.
+# As of 02013-07-21, the package has been fixed. The command is still
+#  included here in case it becomes necessary again.
+
+yn '' "menuconfig; $SHELL" '(to set CONFIG_SPL)' no-fail
+
+sl 'ZFS ebuild' '/usr/portage/sys-fs/zfs-kmod/*.ebuild' \
+	'env EXTRA_ECONF="--enable-linux-builtin --with-spl=/usr/src/linux" ebuild @@@ clean configure'
+
+sl 'ZFS workdir' '/var/tmp/portage/sys-fs/zfs-kmod-*/work/zfs-zfs-*' \
+	'(cd @@@ && ./copy-builtin /usr/src/linux)'
+
+}
+
+local UEFIdir= initramfs= initramfsArgs=
+
+function open_shell {
+	if [[ -n $initramfs ]] {
+		echo '($initramfs = '"${keyfmt}$initramfs$endfmt)"
+	}
+	initramfs=$initramfs $SHELL
+}
+
+function apply-a-kernel-patch {
+	echo 'not yet implemented'
+}
+
+function build_kernel {
+	yn 'Build the kernel? Are you ready?' \
+		"time make -j$cpus"
+}
+
+function install_modules {
+	yn 'Install modules? Are you sure?' \
+		'make modules_install'
+}
+
+function build-initramfs-prolog {
+	if [[ -n $initramfs ]] {
+		yn "${msgfmt}You already generated an initramfs, '${keyfmt}$initramfs$msgfmt'. Do you want to replace it?$endfmt" \
+			initramfs=
+	}
+	if [[ -n $initramfs ]] {
+		return 1
+	}
+	if { false && [[ -e /etc/zfs/zpool.cache ]] } {
+		yn "There appears to be a '/etc/zfs/zpool.cache'. Delete it?" \
+			'rm /etc/zfs/zpool.cache'
+		# Don't return >0 just because `yn` did (e.g., user said no).
+		true
+	}
+}
+function build_initramfs_with_genkernel {
+	if {! build-initramfs-prolog} {
+		return 1
+	}
+	genkernel initramfs --no-install --no-symlink \
+		--no-clean --no-mountboot --disklabel \
+		--zfs --compress-initramfs-type=gzip
+	load-genkernel-initramfs
+}
+function load-genkernel-initramfs {
+	sl 'initramfs archive' '/var/tmp/genkernel/*' "
+		initramfs='@@@'
+		initramfsArgs=\"root=ZFS='@rootfs@'\"
+	"
+}
+function build_initramfs_with_Bliss {
+	if {! build-initramfs-prolog} {
+		return 1
+	}
+	local kernel=$(cd /lib/modules && sl 'kernel version' '*' "echo '@@@'")
+	if [[ -z $kernel ]] {
+		echo 'Aborted.'
+		return 3
+	}
+	load-Bliss-initramfs build
+}
+function load-Bliss-initramfs {
+	local defaultdir=~root/src/Bliss-Initramfs-Creator
+	read Blissdir"?Enter Bliss working directory (default '$defaultdir'):"
+	local Blissinitramfs=$(cd ${Blissdir:-$defaultdir} \
+		&& { [[ $1 == build ]] \
+			&& ./createInit <<<"1\nn\n$kernel" \
+			|| true } \
+		&& sl 'initramfs archive' 'initrd-*' "echo '@@@'")
+	if [[ -z $Blissinitramfs ]] {
+		echo 'Aborted.'
+		return 4
+	}
+	initramfs=$Blissinitramfs
+	initramfsArgs="dozfs root='@rootfs@'"
+}
+function cp_to_UEFI {
+	local desc=$1 src=$2 dir=$3 var=$4
+	if [[ $src == 'other' ]] {
+		read src"?Enter filename of source $desc:
+$PS3"
+	}
+	while ((1)) {
+		read f"?Enter destination filename for $desc (empty line cancels):
+$PS3$dir/"
+		if [[ -z $f ]] {
+			break
+		} elif (( ($#f + 1) > $efiFNameMaxLen )) {
+			err "${keyfmt}$f$endfmt is $(($#f - $efiFNameMaxLen)) bytes too long."
+		} elif (( ($#dir + $#f + 1) > $efiFPathMaxLen )) {
+			err "${keyfmt}$dir/$f$endfmt is $((($#dir + $#f) - $efiFPathMaxLen)) bytes too long."
+		} elif [[ -e $f ]] {
+			yn "${keyfmt}$dir/$f$endfmt already exists. Overwrite?" \
+				break
+		}
+		break
+	}
+	if [[ -n $f ]] {
+		eval ': ${'"$var"'::=$f}'
+		cp "$src" "$dir/$f"
+	}
+}
+function install_to_UEFI {
+	read dir"?Enter target directory (${${UEFIdir:+default: ${keyfmt}$UEFIdir$endfmt}:-empty line cancels}):
+$PS3"
+	if [[ -z $dir ]] {
+		if [[ -n $UEFIdir ]] {
+			dir=$UEFIdir
+		} else {
+			return 1
+		}
+	}
+	if [[ ! -e $dir ]] {
+		err "${keyfmt}$dir$endfmt does not exist."
+		return 2
+	}
+	if [[ ! -d $dir ]] {
+		err "${keyfmt}$dir$endfmt is not a directory."
+		return 3
+	}
+	local mntpt="$(stat -c%m $dir)"
+	local esp="${$(mount | grep -F $mntpt)%% *}"
+	local device="${esp%<->}"
+	local partition="${esp:${#${esp%<->}}}"
+	esp=
+	while ((1)) {
+		if [[ -n $device && -n $partition ]] {
+			yn "Is ${keyfmt}$device$endfmt partition ${keyfmt}$partition$endfmt the UEFI System Partition?" \
+				esp=go
+			## `break` in `yn` doesn't seem to work.
+			if [[ $esp == go ]] {
+				break
+			}
+		}
+		device=
+		partition=
+		sl 'device that the UEFI System Partition is on' \
+			'/dev/sd^*<->' "device='@@@'"
+		if [[ -n $device ]] {
+			sl "partition of ${keyfmt}$device$endfmt that is the UEFI System Partition" \
+				"$device<->" "partition='@@@' \
+					&& partition=\${partition:$#device}"
+		} else {
+			## Skip selecting device to cancel install_to_UEFI.
+			return 4
+		}
+	}
+	UEFIdir=$dir
+	sl "kernel image to install to ${keyfmt}$dir$endfmt" \
+		'arch/*/boot/(#i)*image*(.)' "
+		cp_to_UEFI 'kernel image' '@@@' '$dir' UEFIkernel"
+	sl "initramfs archive to install to ${keyfmt}$dir$endfmt" \
+		"$initramfs" "
+		cp_to_UEFI 'initramfs archive' '@@@' '$dir' UEFIinitramfs"
+	sl 'root filesystem dataset' \
+		" $(zfs list -o name | tail -n+2) (other)" "rootfs='@@@'"
+	if [[ $rootfs == '(other)' ]] {
+		read rootfs"?Enter root filesystem dataset name:
+$PS3"
+	}
+	read label"?Enter boot entry label for kernel:
+$PS3"
+	UEFIkernel="${${dir:$#mntpt}//\//\\}\\$UEFIkernel"
+	UEFIinitramfs="${dir:$(($#mntpt + 1))}/${UEFIinitramfs}"
+	local ebm="efibootmgr -v -c -d ${(q-)device} -p ${(q-)partition} -L ${(q-)label} -l ${(q-)UEFIkernel} -u ro ${initramfsArgs/@rootfs@/$rootfs} initrd=${(q-)UEFIinitramfs}"
+	yn "Run \"$ebm\"?" $ebm
+}
+
+echo "${headerfmt}What next?$endfmt"
+select cmd in \
+	'menuconfig' 'apply a kernel patch' 'build kernel' 'install modules' \
+	'build initramfs with genkernel' 'load existing genkernel initramfs' \
+	'build initramfs with Bliss' 'load existing Bliss initramfs' \
+	'install to UEFI' \
+	'open shell'
+{
+	drop_caches
+	case $cmd {
+		(menuconfig)
+			menuconfig;;
+		(apply a kernel patch)
+			apply-a-kernel-patch;;
+		(build kernel)
+			build_kernel;;
+		(install modules)
+			install_modules;;
+		(build initramfs with genkernel)
+			build_initramfs_with_genkernel;;
+		(load existing genkernel initramfs)
+			load-genkernel-initramfs;;
+		(build initramfs with Bliss)
+			build_initramfs_with_Bliss;;
+		(load existing Bliss initramfs)
+			load-Bliss-initramfs;;
+		(install to UEFI)
+			install_to_UEFI;;
+		(open shell)
+			open_shell;;
+		(*)
+			msg 'What?';;
+	}
+	msg "(Press ${keyfmt}Enter$endfmt to show menu, or ${keyfmt}Control-D$endfmt to quit.)"
+}
