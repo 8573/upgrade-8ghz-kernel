@@ -159,7 +159,7 @@ sl 'SPL workdir' '/var/tmp/portage/sys-kernel/spl-*/work/spl-spl-*' \
 yn '' "menuconfig; $SHELL" '(to set CONFIG_SPL)' no-fail
 
 sl 'ZFS ebuild' '/usr/portage/sys-fs/zfs-kmod/*.ebuild' \
-	'env EXTRA_ECONF="--enable-linux-builtin --with-spl=/usr/src/linux" ebuild @@@ clean configure'
+	'env EXTRA_ECONF="--enable-linux-builtin --with-spl{,-obj}=/usr/src/linux" ebuild @@@ clean configure'
 
 sl 'ZFS workdir' '/var/tmp/portage/sys-fs/zfs-kmod-*/work/zfs-zfs-*' \
 	'(cd @@@ && ./copy-builtin /usr/src/linux)'
