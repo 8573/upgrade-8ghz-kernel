@@ -27,14 +27,14 @@ function err {
 	echo "$errfmt$1$endfmt"
 }
 
-fail() {
-	if [[ -n $1 && -n $2 && -z $3 ]]; then
-		err $2
-		exit $1
-	else
-		err "fail($1, '$2'): bad arguments"
+function fail {
+	(( $# == 2 )) || {
+		err "fail(${(q-)1-<none>}, ${(q-)2-<none>}): bad arguments"
 		exit 2
-	fi
+	}
+
+	err $2
+	exit $1
 }
 
 function drop_caches {
