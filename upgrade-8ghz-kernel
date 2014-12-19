@@ -19,6 +19,9 @@ local efiFNameMaxLen=27
 
 PS3="	$fg_bold[green]?>$reset_color "
 
+# Set CC to GCC, in case it's set to Clang.
+export CC=gcc
+
 function msg {
 	echo "$msgfmt$1$endfmt"
 }
